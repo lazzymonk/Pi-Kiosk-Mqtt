@@ -1,0 +1,9 @@
+{
+    "mqtt_broker": "192.168.0.10",
+    "mqtt_port": 1883,
+    "mqtt_username": "",
+    "mqtt_password": "",
+    "mqtt_topic_prefix": "kiosk",
+    "webpage_url": "https://www.example.com",
+    "screen_timeout": 0
+}
