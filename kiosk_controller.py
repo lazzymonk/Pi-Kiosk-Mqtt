@@ -311,12 +311,88 @@ class KioskMQTT:
             log.info("Reboot requested via MQTT")
             self._publish_status()
             subprocess.run(["sudo", "reboot"], check=False)
+    @staticmethod
+    def _get_system_stats() -> dict:
+        """Gather CPU, RAM, temperature, and disk stats."""
+        stats = {}
+ 
+        # CPU usage (1-second sample)
+        try:
+            with open("/proc/stat") as f:
+                line1 = f.readline().split()
+            time.sleep(0.5)
+            with open("/proc/stat") as f:
+                line2 = f.readline().split()
+            idle1 = int(line1[4])
+            idle2 = int(line2[4])
+            total1 = sum(int(x) for x in line1[1:])
+            total2 = sum(int(x) for x in line2[1:])
+            cpu_pct = round(100.0 * (1.0 - (idle2 - idle1) / max(total2 - total1, 1)), 1)
+            stats["cpu_percent"] = cpu_pct
+        except Exception:
+            stats["cpu_percent"] = None
+ 
+        # CPU temperature
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp") as f:
+                stats["cpu_temp_c"] = round(int(f.read().strip()) / 1000.0, 1)
+        except Exception:
+            stats["cpu_temp_c"] = None
+ 
+        # RAM
+        try:
+            with open("/proc/meminfo") as f:
+                meminfo = {}
+                for line in f:
+                    parts = line.split()
+                    meminfo[parts[0].rstrip(":")] = int(parts[1])
+            total = meminfo["MemTotal"]
+            available = meminfo["MemAvailable"]
+            used = total - available
+            stats["ram_total_mb"] = round(total / 1024, 1)
+            stats["ram_used_mb"] = round(used / 1024, 1)
+            stats["ram_percent"] = round(100.0 * used / max(total, 1), 1)
+        except Exception:
+            stats["ram_total_mb"] = None
+            stats["ram_used_mb"] = None
+            stats["ram_percent"] = None
+ 
+        # Disk (root filesystem)
+        try:
+            st = os.statvfs("/")
+            total = st.f_blocks * st.f_frsize
+            free = st.f_bavail * st.f_frsize
+            used = total - free
+            stats["disk_total_gb"] = round(total / (1024 ** 3), 1)
+            stats["disk_used_gb"] = round(used / (1024 ** 3), 1)
+            stats["disk_free_gb"] = round(free / (1024 ** 3), 1)
+            stats["disk_percent"] = round(100.0 * used / max(total, 1), 1)
+        except Exception:
+            stats["disk_total_gb"] = None
+            stats["disk_used_gb"] = None
+            stats["disk_free_gb"] = None
+            stats["disk_percent"] = None
+ 
+        # Uptime
+        try:
+            with open("/proc/uptime") as f:
+                uptime_secs = int(float(f.read().split()[0]))
+            hours, remainder = divmod(uptime_secs, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            stats["uptime"] = f"{hours}h {minutes}m {seconds}s"
+        except Exception:
+            stats["uptime"] = None
+ 
+        return stats
+    
 
     def _publish_status(self):
+        system = self._get_system_stats()
         status = json.dumps({
             "online": True,
             "screen": "on" if self.display.screen_on else "off",
             "url": self.browser.url,
+            "system": system,
         })
         self.client.publish(f"{self.prefix}/status/response", status, retain=True)
 
