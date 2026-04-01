@@ -43,6 +43,9 @@ DEFAULT_CONFIG = {
     "webpage_url": "https://example.com",
     "screen_timeout": 0,  # 0 = never blank
     "scale_factor": 1.0,  # adjust if content doesn't fit (try 0.9-1.0 for small screens)
+    "rotation": 0,  # 0, 90, 180, or 270 degrees
+    "brightness": 255,  # default backlight brightness (0-255)
+    "screen_off_method": "backlight",  # "backlight" (set to 0) or "dpms" (signal off)
 }
 
 CONFIG_FILE = Path("/etc/kiosk/config.json")
@@ -75,7 +78,7 @@ def load_config() -> dict:
         env_val = os.environ.get(env_key)
         if env_val is not None:
             # Cast to int for port
-            if key in ("mqtt_port", "screen_timeout"):
+            if key in ("mqtt_port", "screen_timeout", "rotation", "brightness"):
                 env_val = int(env_val)
             elif key in ("scale_factor",):
                 env_val = float(env_val)
@@ -85,13 +88,17 @@ def load_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Display control (uses wlr-randr for Wayland / wlopm, or xrandr / xset for X)
+# Display control
 # ---------------------------------------------------------------------------
 class DisplayController:
-    """Handles turning the display on and off."""
+    """Handles turning the display on/off and backlight brightness."""
 
-    def __init__(self):
+    def __init__(self, screen_off_method: str = "backlight", default_brightness: int = 255):
         self.screen_on = True
+        self.screen_off_method = screen_off_method
+        self.default_brightness = max(0, min(255, default_brightness))
+        self.current_brightness = self.default_brightness
+        self._backlight_path = self._find_backlight()
         self._detect_backend()
 
     def _detect_backend(self):
@@ -102,31 +109,90 @@ class DisplayController:
         else:
             self.backend = "x11"
         log.info("Display backend: %s", self.backend)
+        log.info("Screen off method: %s", self.screen_off_method)
+        if self._backlight_path:
+            log.info("Backlight device: %s", self._backlight_path)
+        else:
+            log.warning("No backlight device found in /sys/class/backlight/")
+
+    def _find_backlight(self) -> str:
+        """Find the first backlight device path."""
+        backlight_dir = Path("/sys/class/backlight")
+        if backlight_dir.exists():
+            for entry in backlight_dir.iterdir():
+                brightness_file = entry / "brightness"
+                if brightness_file.exists():
+                    return str(entry)
+        return ""
+
+    def set_brightness(self, value: int):
+        """Set backlight brightness (0-255)."""
+        value = max(0, min(255, value))
+        if not self._backlight_path:
+            log.error("No backlight device found")
+            return False
+        try:
+            brightness_file = os.path.join(self._backlight_path, "brightness")
+            subprocess.run(
+                ["sudo", "tee", brightness_file],
+                input=str(value).encode(),
+                stdout=subprocess.DEVNULL,
+                check=True, timeout=5,
+            )
+            self.current_brightness = value
+            log.info("Backlight set to %d", value)
+
+            # Update screen state based on brightness
+            if value == 0:
+                self.screen_on = False
+            else:
+                self.screen_on = True
+
+            return True
+        except Exception as e:
+            log.error("Failed to set backlight: %s", e)
+            return False
 
     def screen_off(self):
         if not self.screen_on:
             return
+        if self.screen_off_method == "backlight":
+            self.set_brightness(0)
+        else:
+            self._dpms_off()
+            self.screen_on = False
+        log.info("Screen turned OFF (method: %s)", self.screen_off_method)
+
+    def screen_turn_on(self):
+        if self.screen_on:
+            return
+        if self.screen_off_method == "backlight":
+            # Restore to the last non-zero brightness, or default
+            restore = self.default_brightness if self.current_brightness == 0 else self.current_brightness
+            if restore == 0:
+                restore = 255
+            self.set_brightness(restore)
+        else:
+            self._dpms_on()
+            self.screen_on = True
+        log.info("Screen turned ON (method: %s)", self.screen_off_method)
+
+    def _dpms_off(self):
         try:
             if self.backend == "wayland":
-                # Try wlopm first, fall back to wlr-randr
                 try:
                     subprocess.run(["wlopm", "--off", "*"], check=True, timeout=5)
                 except FileNotFoundError:
                     subprocess.run(
                         ["wlr-randr", "--output", self._get_output(), "--off"],
-                        check=True,
-                        timeout=5,
+                        check=True, timeout=5,
                     )
             else:
                 subprocess.run(["xset", "dpms", "force", "off"], check=True, timeout=5)
-            self.screen_on = False
-            log.info("Screen turned OFF")
         except Exception as e:
-            log.error("Failed to turn screen off: %s", e)
+            log.error("DPMS off failed: %s", e)
 
-    def screen_turn_on(self):
-        if self.screen_on:
-            return
+    def _dpms_on(self):
         try:
             if self.backend == "wayland":
                 try:
@@ -134,15 +200,12 @@ class DisplayController:
                 except FileNotFoundError:
                     subprocess.run(
                         ["wlr-randr", "--output", self._get_output(), "--on"],
-                        check=True,
-                        timeout=5,
+                        check=True, timeout=5,
                     )
             else:
                 subprocess.run(["xset", "dpms", "force", "on"], check=True, timeout=5)
-            self.screen_on = True
-            log.info("Screen turned ON")
         except Exception as e:
-            log.error("Failed to turn screen on: %s", e)
+            log.error("DPMS on failed: %s", e)
 
     def _get_output(self) -> str:
         """Get the first connected output name for wlr-randr."""
@@ -155,7 +218,7 @@ class DisplayController:
                     return line.split()[0]
         except Exception:
             pass
-        return "HDMI-A-1"  # sensible default for Pi
+        return "HDMI-A-1"
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +329,7 @@ class KioskMQTT:
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         log.info("MQTT connected (rc=%s)", rc)
-        topics = ["refresh", "screen", "url", "status", "reboot"]
+        topics = ["refresh", "screen", "brightness", "url", "status", "reboot"]
         for t in topics:
             client.subscribe(f"{self.prefix}/{t}")
             log.info("  Subscribed to %s/%s", self.prefix, t)
@@ -297,6 +360,13 @@ class KioskMQTT:
                     self.display.screen_off()
                 else:
                     self.display.screen_turn_on()
+
+        elif action == "brightness":
+            try:
+                value = int(payload)
+                self.display.set_brightness(value)
+            except ValueError:
+                log.warning("Invalid brightness value: %s (must be 0-255)", payload)
 
         elif action == "url":
             # For URL, use the raw (non-lowered) payload
@@ -391,6 +461,7 @@ class KioskMQTT:
         status = json.dumps({
             "online": True,
             "screen": "on" if self.display.screen_on else "off",
+            "brightness": self.display.current_brightness,
             "url": self.browser.url,
             "system": system,
         })
@@ -403,12 +474,138 @@ class KioskMQTT:
 
 
 # ---------------------------------------------------------------------------
+# Display rotation
+# ---------------------------------------------------------------------------
+ROTATION_MAP = {
+    0: "normal",
+    90: "right",
+    180: "inverted",
+    270: "left",
+}
+
+# Coordinate Transformation Matrix for xinput, mapping rotation to touch input
+# See: https://wiki.archlinux.org/title/Calibrating_Touchscreen
+TOUCH_MATRIX = {
+    0:   "1 0 0 0 1 0 0 0 1",
+    90:  "0 1 0 -1 0 1 0 0 1",
+    180: "-1 0 1 0 -1 1 0 0 1",
+    270: "0 -1 1 1 0 0 0 0 1",
+}
+
+
+def _find_touch_devices():
+    """Find all touchscreen input device IDs via xinput."""
+    devices = []
+    try:
+        result = subprocess.run(
+            ["xinput", "list", "--name-only"],
+            capture_output=True, text=True, timeout=5,
+        )
+        id_result = subprocess.run(
+            ["xinput", "list", "--id-only"],
+            capture_output=True, text=True, timeout=5,
+        )
+        names = result.stdout.strip().splitlines()
+        ids = id_result.stdout.strip().splitlines()
+
+        touch_keywords = ["touch", "Touch", "TOUCH", "FT5406", "Goodix", "eGalax", "HID"]
+        for name, dev_id in zip(names, ids):
+            if any(kw in name for kw in touch_keywords):
+                devices.append((dev_id.strip(), name.strip()))
+    except Exception:
+        pass
+
+    # Fallback: try to find any pointer device with touch-like properties
+    if not devices:
+        try:
+            result = subprocess.run(
+                ["xinput", "list"], capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                if "slave  pointer" in line or "floating slave" in line:
+                    # Extract id=N
+                    for part in line.split():
+                        if part.startswith("id="):
+                            dev_id = part.split("=")[1]
+                            # Check if it has the coordinate transform property
+                            prop_result = subprocess.run(
+                                ["xinput", "list-props", dev_id],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            if "Coordinate Transformation Matrix" in prop_result.stdout:
+                                dev_name = line.split("id=")[0].strip().rstrip("\t")
+                                devices.append((dev_id, dev_name))
+        except Exception:
+            pass
+
+    return devices
+
+
+def apply_rotation(degrees: int):
+    """Rotate the X display and touchscreen input using xrandr and xinput."""
+    orientation = ROTATION_MAP.get(degrees)
+    if orientation is None:
+        log.warning("Invalid rotation %s, must be 0/90/180/270. Skipping.", degrees)
+        return
+    if degrees == 0:
+        log.info("Rotation: 0 (normal)")
+        return
+
+    # Find the connected output name
+    try:
+        result = subprocess.run(
+            ["xrandr", "--query"], capture_output=True, text=True, timeout=5
+        )
+        output_name = None
+        for line in result.stdout.splitlines():
+            if " connected" in line:
+                output_name = line.split()[0]
+                break
+
+        if not output_name:
+            log.error("Could not find connected display for rotation")
+            return
+
+        subprocess.run(
+            ["xrandr", "--output", output_name, "--rotate", orientation],
+            check=True,
+            timeout=5,
+        )
+        log.info("Rotated display %s to %s (%d degrees)", output_name, orientation, degrees)
+    except Exception as e:
+        log.error("Failed to rotate display: %s", e)
+        return
+
+    # Apply matching coordinate transform to all touch devices
+    matrix = TOUCH_MATRIX.get(degrees, TOUCH_MATRIX[0])
+    touch_devices = _find_touch_devices()
+
+    if not touch_devices:
+        log.warning("No touchscreen devices found to rotate")
+        return
+
+    for dev_id, dev_name in touch_devices:
+        try:
+            subprocess.run(
+                ["xinput", "set-prop", dev_id,
+                 "Coordinate Transformation Matrix"] + matrix.split(),
+                check=True, timeout=5,
+            )
+            log.info("Rotated touch input for '%s' (id=%s)", dev_name, dev_id)
+        except Exception as e:
+            log.error("Failed to rotate touch for '%s': %s", dev_name, e)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     config = load_config()
 
-    display = DisplayController()
+    display = DisplayController(
+        screen_off_method=config["screen_off_method"],
+        default_brightness=config["brightness"],
+    )
     browser = BrowserController(config["webpage_url"], config["scale_factor"])
 
     # Disable screen blanking
@@ -416,6 +613,13 @@ def main():
         subprocess.run(["xset", "s", "off"], check=False)
         subprocess.run(["xset", "-dpms"], check=False)
         subprocess.run(["xset", "s", "noblank"], check=False)
+
+    # Set initial brightness
+    if display._backlight_path:
+        display.set_brightness(config["brightness"])
+
+    # Apply display rotation before launching browser
+    apply_rotation(config["rotation"])
 
     browser.start()
     time.sleep(3)  # give chromium a moment to launch

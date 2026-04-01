@@ -126,11 +126,17 @@ OPENBOX
 
 # --- Systemd service to auto-start X + kiosk on boot ---
 echo "[6/6] Creating systemd service..."
+
+# Disable getty on tty1 so it doesn't fight with our X server
+sudo systemctl disable getty@tty1.service 2>/dev/null || true
+sudo systemctl mask getty@tty1.service
+
 sudo tee /etc/systemd/system/kiosk.service > /dev/null << EOF
 [Unit]
 Description=Kiosk Display (X + Chromium + MQTT)
-After=network-online.target mosquitto.service
+After=network-online.target mosquitto.service multi-user.target systemd-logind.service
 Wants=network-online.target
+Conflicts=getty@tty1.service
 
 [Service]
 Type=simple
@@ -141,11 +147,19 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=kiosk
 Environment=XDG_RUNTIME_DIR=/run/user/$(id -u $USER)
+PAMName=login
+UtmpIdentifier=tty1
+
+# Wait a few seconds for display hardware and network to settle
+ExecStartPre=/bin/sleep 5
 ExecStartPre=/bin/chvt 1
 ExecStart=/usr/bin/startx /home/$USER/.xinitrc -- :0 vt1 -nocursor -keeptty
-Restart=on-failure
+
+Restart=always
 RestartSec=10
-TimeoutStartSec=30
+TimeoutStartSec=60
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
