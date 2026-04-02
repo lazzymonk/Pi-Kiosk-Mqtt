@@ -54,7 +54,8 @@ Edit `/etc/kiosk/config.json`:
     "scale_factor": 1.0,
     "rotation": 0,
     "brightness": 255,
-    "screen_off_method": "backlight"
+    "screen_off_method": "backlight",
+    "status_interval": 60
 }
 ```
 
@@ -73,6 +74,7 @@ Edit `/etc/kiosk/config.json`:
 | `rotation` | `0` | Display rotation: `0`, `90`, `180`, or `270` degrees |
 | `brightness` | `255` | Default backlight brightness (0-255) |
 | `screen_off_method` | `backlight` | How to turn screen off: `backlight` (dims to 0) or `dpms` (sends display-off signal) |
+| `status_interval` | `0` | Auto-publish status every N seconds (0 = manual only via `kiosk/status`) |
 
 You can also use environment variables (they override the config file). Prefix any key with `KIOSK_`, e.g. `KIOSK_MQTT_BROKER`, `KIOSK_WEBPAGE_URL`, `KIOSK_ROTATION`.
 

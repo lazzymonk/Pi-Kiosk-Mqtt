@@ -23,6 +23,7 @@ import json
 import time
 import logging
 import os
+import threading
 from pathlib import Path
 
 try:
@@ -46,6 +47,7 @@ DEFAULT_CONFIG = {
     "rotation": 0,  # 0, 90, 180, or 270 degrees
     "brightness": 255,  # default backlight brightness (0-255)
     "screen_off_method": "backlight",  # "backlight" (set to 0) or "dpms" (signal off)
+    "status_interval": 0,  # auto-publish status every N seconds (0 = manual only)
 }
 
 CONFIG_FILE = Path("/etc/kiosk/config.json")
@@ -78,7 +80,7 @@ def load_config() -> dict:
         env_val = os.environ.get(env_key)
         if env_val is not None:
             # Cast to int for port
-            if key in ("mqtt_port", "screen_timeout", "rotation", "brightness"):
+            if key in ("mqtt_port", "screen_timeout", "rotation", "brightness", "status_interval"):
                 env_val = int(env_val)
             elif key in ("scale_factor",):
                 env_val = float(env_val)
@@ -311,6 +313,8 @@ class KioskMQTT:
         self.display = display
         self.browser = browser
         self.prefix = config["mqtt_topic_prefix"]
+        self.status_interval = config["status_interval"]
+        self._status_timer = None
 
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config["mqtt_username"]:
@@ -327,6 +331,27 @@ class KioskMQTT:
         self.client.connect(self.config["mqtt_broker"], self.config["mqtt_port"], keepalive=60)
         self.client.loop_start()
 
+    def _start_status_timer(self):
+        """Start the recurring status publish timer."""
+        if self.status_interval > 0:
+            self._status_timer = threading.Timer(self.status_interval, self._auto_publish_status)
+            self._status_timer.daemon = True
+            self._status_timer.start()
+
+    def _stop_status_timer(self):
+        """Stop the recurring status publish timer."""
+        if self._status_timer is not None:
+            self._status_timer.cancel()
+            self._status_timer = None
+
+    def _auto_publish_status(self):
+        """Publish status and reschedule the timer."""
+        try:
+            self._publish_status()
+        except Exception as e:
+            log.error("Auto status publish failed: %s", e)
+        self._start_status_timer()
+
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         log.info("MQTT connected (rc=%s)", rc)
         topics = ["refresh", "screen", "brightness", "url", "status", "reboot"]
@@ -336,8 +361,15 @@ class KioskMQTT:
 
         self._publish_status()
 
+        # Start auto-publish timer
+        self._stop_status_timer()
+        self._start_status_timer()
+        if self.status_interval > 0:
+            log.info("Auto-publishing status every %ds", self.status_interval)
+
     def _on_disconnect(self, client, userdata, flags, rc, properties=None):
         log.warning("MQTT disconnected (rc=%s), will auto-reconnect", rc)
+        self._stop_status_timer()
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic
@@ -468,6 +500,7 @@ class KioskMQTT:
         self.client.publish(f"{self.prefix}/status/response", status, retain=True)
 
     def disconnect(self):
+        self._stop_status_timer()
         self.client.publish(f"{self.prefix}/status/response", "offline", retain=True)
         self.client.disconnect()
         self.client.loop_stop()
