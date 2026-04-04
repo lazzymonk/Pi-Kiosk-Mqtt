@@ -100,6 +100,7 @@ class DisplayController:
         self.screen_off_method = screen_off_method
         self.default_brightness = max(0, min(255, default_brightness))
         self.current_brightness = self.default_brightness
+        self._last_brightness = self.default_brightness  # remembers brightness before screen off
         self._backlight_path = self._find_backlight()
         self._detect_backend()
 
@@ -141,6 +142,9 @@ class DisplayController:
                 stdout=subprocess.DEVNULL,
                 check=True, timeout=5,
             )
+            # Remember last non-zero brightness for restore
+            if value > 0:
+                self._last_brightness = value
             self.current_brightness = value
             log.info("Backlight set to %d", value)
 
@@ -169,10 +173,8 @@ class DisplayController:
         if self.screen_on:
             return
         if self.screen_off_method == "backlight":
-            # Restore to the last non-zero brightness, or default
-            restore = self.default_brightness if self.current_brightness == 0 else self.current_brightness
-            if restore == 0:
-                restore = 255
+            # Restore to the brightness before screen was turned off
+            restore = self._last_brightness
             self.set_brightness(restore)
         else:
             self._dpms_on()
@@ -380,6 +382,7 @@ class KioskMQTT:
 
         if action == "refresh":
             self.browser.refresh()
+            self._publish_status()
 
         elif action == "screen":
             if payload == "off":
@@ -392,11 +395,13 @@ class KioskMQTT:
                     self.display.screen_off()
                 else:
                     self.display.screen_turn_on()
+            self._publish_status()
 
         elif action == "brightness":
             try:
                 value = int(payload)
                 self.display.set_brightness(value)
+                self._publish_status()
             except ValueError:
                 log.warning("Invalid brightness value: %s (must be 0-255)", payload)
 
@@ -405,6 +410,7 @@ class KioskMQTT:
             raw = msg.payload.decode("utf-8", errors="replace").strip()
             if raw:
                 self.browser.navigate(raw)
+                self._publish_status()
 
         elif action == "status":
             self._publish_status()

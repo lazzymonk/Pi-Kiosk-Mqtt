@@ -1,0 +1,27 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Add Pi Kiosk",
+                "description": "Enter the MQTT topic prefix configured on your Pi Kiosk.",
+                "data": {
+                    "name": "Device name",
+                    "topic_prefix": "MQTT topic prefix"
+                }
+            }
+        },
+        "abort": {
+            "already_configured": "This kiosk topic prefix is already configured."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Pi Kiosk Options",
+                "data": {
+                    "topic_prefix": "MQTT topic prefix"
+                }
+            }
+        }
+    }
+}
