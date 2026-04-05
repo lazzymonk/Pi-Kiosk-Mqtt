@@ -1,6 +1,6 @@
 # Raspberry Pi Kiosk Controller
 
-Turn a headless Raspberry Pi (Lite OS) into a fullscreen web kiosk, controllable via MQTT.
+Turn a headless Raspberry Pi (Lite OS) into a fullscreen web kiosk, controllable via MQTT. Includes a Home Assistant custom component for single-device integration.
 
 ## What it does
 
@@ -9,8 +9,11 @@ Turn a headless Raspberry Pi (Lite OS) into a fullscreen web kiosk, controllable
 - Display rotation support (0, 90, 180, 270 degrees) with automatic touchscreen input mapping
 - Backlight brightness control (0-255) via MQTT
 - Configurable screen-off method: backlight dimming or DPMS signal
-- Publishes detailed status (including CPU, RAM, temperature, disk, uptime) via MQTT
+- Optional pinch-to-zoom disable for touchscreens
+- Auto-publishes status on a configurable interval (CPU, RAM, temperature, disk, uptime)
+- Status updates published immediately after every command
 - Auto-restarts on crash
+- Home Assistant custom component included (single device with all entities)
 
 ## Requirements
 
@@ -55,7 +58,8 @@ Edit `/etc/kiosk/config.json`:
     "rotation": 0,
     "brightness": 255,
     "screen_off_method": "backlight",
-    "status_interval": 60
+    "status_interval": 60,
+    "disable_pinch_zoom": true
 }
 ```
 
@@ -75,6 +79,7 @@ Edit `/etc/kiosk/config.json`:
 | `brightness` | `255` | Default backlight brightness (0-255) |
 | `screen_off_method` | `backlight` | How to turn screen off: `backlight` (dims to 0) or `dpms` (sends display-off signal) |
 | `status_interval` | `0` | Auto-publish status every N seconds (0 = manual only via `kiosk/status`) |
+| `disable_pinch_zoom` | `true` | Disable pinch-to-zoom and swipe navigation on touchscreens |
 
 You can also use environment variables (they override the config file). Prefix any key with `KIOSK_`, e.g. `KIOSK_MQTT_BROKER`, `KIOSK_WEBPAGE_URL`, `KIOSK_ROTATION`.
 
@@ -93,10 +98,10 @@ Set `"rotation"` to rotate the display. The touchscreen input coordinates are au
 
 The `"screen_off_method"` option controls what happens when you send `kiosk/screen off`:
 
-- **`"backlight"`** (recommended for Pi touchscreens) - sets the backlight to 0 via `/sys/class/backlight/*/brightness`. Turning the screen back on restores the previous brightness. This is more reliable for DSI-connected displays.
+- **`"backlight"`** (recommended for Pi touchscreens) - sets the backlight to 0 via `/sys/class/backlight/*/brightness`. Turning the screen back on restores the brightness to the level it was at before being turned off. This is more reliable for DSI-connected displays.
 - **`"dpms"`** - sends a DPMS signal to power off the display. Works better with HDMI monitors.
 
-The `"brightness"` option sets the default backlight level on startup and is the level restored when turning the screen back on.
+The `"brightness"` option sets the default backlight level on startup.
 
 ## MQTT Topics
 
@@ -111,6 +116,8 @@ All topics use the prefix from config (default: `kiosk`).
 | `kiosk/url` | a URL string | Navigate to new URL |
 | `kiosk/status` | anything | Request status report |
 | `kiosk/reboot` | anything | Reboot the Pi |
+
+All commands automatically publish an updated status response immediately after executing.
 
 ### Status response
 
@@ -136,6 +143,8 @@ Status is published to `kiosk/status/response` as retained JSON:
     }
 }
 ```
+
+When the kiosk goes offline, the MQTT last will publishes `"offline"` to this topic.
 
 ## Testing with mosquitto
 
@@ -163,10 +172,53 @@ mosquitto_pub -h localhost -t kiosk/status -m "?"
 mosquitto_sub -h localhost -t kiosk/status/response -C 1
 ```
 
-## Home Assistant Example
+## Home Assistant Custom Component
+
+A custom component is included that creates a single device in Home Assistant with all controls and sensors. This is the recommended way to integrate with Home Assistant (no manual YAML needed).
+
+### Installation
+
+1. Copy the `custom_components/pi_kiosk` folder into your Home Assistant `config/custom_components/` directory
+2. Restart Home Assistant
+3. Go to **Settings > Devices & Services > Add Integration**
+4. Search for **"Pi Kiosk"**
+5. Enter a name and the MQTT topic prefix (e.g. `kiosk`)
+
+### Entities created
+
+**Controls:**
+
+| Entity | Type | Description |
+|---|---|---|
+| Screen | Switch | Turn display on/off |
+| Brightness | Number (slider) | Backlight brightness 0-255 |
+| URL | Text | Change the displayed webpage |
+| Refresh browser | Button | Refresh the current page |
+| Reboot | Button | Reboot the Raspberry Pi |
+| Request status | Button | Manually request a status update |
+
+**Sensors (diagnostic):**
+
+| Entity | Type | Description |
+|---|---|---|
+| CPU usage | Sensor (%) | Current CPU usage percentage |
+| CPU temperature | Sensor (C) | CPU temperature |
+| RAM usage | Sensor (%) | RAM usage percentage |
+| RAM used | Sensor (MB) | RAM used in megabytes |
+| Disk usage | Sensor (%) | Disk usage percentage |
+| Disk free | Sensor (GB) | Free disk space in gigabytes |
+| Last boot | Sensor (timestamp) | When the Pi last booted (shown as relative time) |
+| Status | Sensor | Online/Offline (always available, even when kiosk is offline) |
+
+### Multiple kiosks
+
+Add the integration multiple times with different topic prefixes. Each gets its own device with its own set of entities.
+
+### Manual YAML (alternative)
+
+If you prefer not to use the custom component, you can configure entities manually in `configuration.yaml`:
 
 ```yaml
-# configuration.yaml
 mqtt:
   button:
     - name: "Kiosk Refresh"
@@ -213,10 +265,6 @@ mqtt:
       value_template: "{{ value_json.system.disk_free_gb }}"
       unit_of_measurement: "GB"
 
-    - name: "Kiosk Uptime"
-      state_topic: "kiosk/status/response"
-      value_template: "{{ value_json.system.uptime }}"
-
   text:
     - name: "Kiosk URL"
       command_topic: "kiosk/url"
@@ -238,13 +286,50 @@ sudo systemctl restart kiosk
 sudo systemctl stop kiosk
 ```
 
-## Multiple Kiosks
+## Updating
 
-Run several Pis with different topic prefixes:
+After changing the Python controller:
 
-```json
-{"mqtt_topic_prefix": "kiosk/kitchen"}
-{"mqtt_topic_prefix": "kiosk/office"}
+```bash
+sudo cp kiosk_controller.py /opt/kiosk/kiosk_controller.py
+sudo systemctl restart kiosk
+```
+
+After changing the service file (via `setup.sh`):
+
+```bash
+./setup.sh
+sudo systemctl daemon-reload
+sudo systemctl restart kiosk
+```
+
+## Project Structure
+
+```
+pi-kiosk/
+├── kiosk_controller.py          # Main Python controller
+├── setup.sh                     # Installer script
+├── config.json                  # Example config
+├── README.md
+└── custom_components/
+    └── pi_kiosk/                # Home Assistant custom component
+        ├── __init__.py
+        ├── manifest.json
+        ├── config_flow.py
+        ├── coordinator.py
+        ├── const.py
+        ├── switch.py
+        ├── number.py
+        ├── button.py
+        ├── text.py
+        ├── sensor.py
+        ├── strings.json
+        ├── translations/en.json
+        └── brand/
+            ├── icon.png
+            ├── icon@2x.png
+            ├── logo.png
+            └── logo@2x.png
 ```
 
 ## Troubleshooting
@@ -253,12 +338,20 @@ Run several Pis with different topic prefixes:
 
 **Service fails to start intermittently**: The setup script disables `getty@tty1` to prevent conflicts. If you've re-enabled it, run `sudo systemctl mask getty@tty1.service`.
 
+**Service restart is slow**: The service is configured with a 5-second stop timeout. If it's still slow, check that the updated `setup.sh` has been run and `sudo systemctl daemon-reload` has been executed.
+
 **MQTT not connecting**: Verify the broker address in config. Test with `mosquitto_pub -h YOUR_BROKER -t test -m hello`.
 
 **Brightness not working**: Check that a backlight device exists: `ls /sys/class/backlight/`. The script needs sudo access to write to the brightness file. Verify with `echo 128 | sudo tee /sys/class/backlight/*/brightness`.
 
+**Brightness resets to max after screen on**: Make sure you're running the latest `kiosk_controller.py` which tracks brightness before screen-off separately.
+
 **Rotation not working**: Make sure `xrandr` is available. For touchscreen input mapping after rotation, install `xinput` (`sudo apt install xinput`).
 
 **Touch input doesn't match after rotation**: Run `export DISPLAY=:0 && xinput list` to check if your touch device is detected. The script looks for common touch device names. Check `journalctl -u kiosk` to see if rotation was applied.
+
+**HA switch doesn't update after toggling**: Make sure you're running the latest `kiosk_controller.py` which publishes status after every command.
+
+**HA uptime sensor logs too many state changes**: Make sure you're using the latest custom component which uses a "Last boot" timestamp sensor instead of a string-based uptime.
 
 **Chromium crashes on low-memory Pis**: Add a swap file or use `--disable-gpu` flag. You can add extra Chromium flags by editing `/opt/kiosk/kiosk_controller.py`.
