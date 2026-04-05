@@ -101,7 +101,6 @@ class DisplayController:
         self.screen_off_method = screen_off_method
         self.default_brightness = max(0, min(255, default_brightness))
         self.current_brightness = self.default_brightness
-        self._last_brightness = self.default_brightness  # remembers brightness before screen off
         self._backlight_path = self._find_backlight()
         self._detect_backend()
 
@@ -129,9 +128,8 @@ class DisplayController:
                     return str(entry)
         return ""
 
-    def set_brightness(self, value: int):
-        """Set backlight brightness (0-255)."""
-        value = max(0, min(255, value))
+    def _write_backlight(self, value: int) -> bool:
+        """Write a value directly to the backlight hardware."""
         if not self._backlight_path:
             log.error("No backlight device found")
             return False
@@ -143,44 +141,47 @@ class DisplayController:
                 stdout=subprocess.DEVNULL,
                 check=True, timeout=5,
             )
-            # Remember last non-zero brightness for restore
-            if value > 0:
-                self._last_brightness = value
-            self.current_brightness = value
-            log.info("Backlight set to %d", value)
-
-            # Update screen state based on brightness
-            if value == 0:
-                self.screen_on = False
-            else:
-                self.screen_on = True
-
             return True
         except Exception as e:
-            log.error("Failed to set backlight: %s", e)
+            log.error("Failed to write backlight: %s", e)
             return False
+
+    def set_brightness(self, value: int):
+        """Set the desired brightness (0-255).
+
+        Updates the stored brightness value. If the screen is on, also
+        applies it to the hardware. If the screen is off, just remembers
+        the value for when the screen turns back on.
+        """
+        value = max(0, min(255, value))
+        self.current_brightness = value
+        log.info("Brightness set to %d", value)
+
+        if self.screen_on:
+            self._write_backlight(value)
+
+        return True
 
     def screen_off(self):
         if not self.screen_on:
             return
         if self.screen_off_method == "backlight":
-            self.set_brightness(0)
+            self._write_backlight(0)
         else:
             self._dpms_off()
-            self.screen_on = False
+        self.screen_on = False
         log.info("Screen turned OFF (method: %s)", self.screen_off_method)
 
     def screen_turn_on(self):
         if self.screen_on:
             return
         if self.screen_off_method == "backlight":
-            # Restore to the brightness before screen was turned off
-            restore = self._last_brightness
-            self.set_brightness(restore)
+            self._write_backlight(self.current_brightness)
         else:
             self._dpms_on()
-            self.screen_on = True
-        log.info("Screen turned ON (method: %s)", self.screen_off_method)
+        self.screen_on = True
+        log.info("Screen turned ON (method: %s, brightness: %d)",
+                 self.screen_off_method, self.current_brightness)
 
     def _dpms_off(self):
         try:
@@ -305,12 +306,14 @@ class BrowserController:
 
     def stop(self):
         if self.process:
-            self.process.terminate()
+            self.process.kill()  # SIGKILL immediately, Chromium is slow with SIGTERM
             try:
-                self.process.wait(timeout=5)
+                self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                pass
             self.process = None
+        # Clean up any orphan chromium processes
+        subprocess.run(["pkill", "-9", "-f", "chromium"], check=False, timeout=5)
 
 
 # ---------------------------------------------------------------------------
