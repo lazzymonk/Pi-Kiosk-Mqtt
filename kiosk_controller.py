@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
     "brightness": 255,  # default backlight brightness (0-255)
     "screen_off_method": "backlight",  # "backlight" (set to 0) or "dpms" (signal off)
     "status_interval": 0,  # auto-publish status every N seconds (0 = manual only)
+    "disable_pinch_zoom": True,  # disable pinch-to-zoom on touchscreens
 }
 
 CONFIG_FILE = Path("/etc/kiosk/config.json")
@@ -231,9 +232,10 @@ class DisplayController:
 class BrowserController:
     """Manages Chromium in kiosk mode."""
 
-    def __init__(self, url: str, scale_factor: float = 1.0):
+    def __init__(self, url: str, scale_factor: float = 1.0, disable_pinch_zoom: bool = True):
         self.url = url
         self.scale_factor = scale_factor
+        self.disable_pinch_zoom = disable_pinch_zoom
         self.process = None
 
     def _get_screen_resolution(self):
@@ -273,8 +275,13 @@ class BrowserController:
             "--high-dpi-support=1",
             "--autoplay-policy=no-user-gesture-required",
             "--check-for-update-interval=31536000",  # don't check for updates
-            self.url,
         ]
+        if self.disable_pinch_zoom:
+            cmd.extend([
+                "--disable-pinch",
+                "--overscroll-history-navigation=disabled",
+            ])
+        cmd.append(self.url)
         log.info("Starting Chromium: %s", self.url)
         self.process = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -645,7 +652,11 @@ def main():
         screen_off_method=config["screen_off_method"],
         default_brightness=config["brightness"],
     )
-    browser = BrowserController(config["webpage_url"], config["scale_factor"])
+    browser = BrowserController(
+        config["webpage_url"],
+        config["scale_factor"],
+        config["disable_pinch_zoom"],
+    )
 
     # Disable screen blanking
     if display.backend == "x11":

@@ -5,5 +5,9 @@
     "mqtt_password": "",
     "mqtt_topic_prefix": "kiosk",
     "webpage_url": "https://www.example.com",
-    "screen_timeout": 0
+    "screen_timeout": 0,
+    "scale_factor": 1.0,
+    "rotation": 270,
+    "status_interval": 60,
+    "disable_pinch_zoom": true
 }
