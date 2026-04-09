@@ -23,6 +23,7 @@ import json
 import time
 import logging
 import os
+import socket
 import threading
 from pathlib import Path
 
@@ -371,6 +372,9 @@ class KioskMQTT:
             client.subscribe(f"{self.prefix}/{t}")
             log.info("  Subscribed to %s/%s", self.prefix, t)
 
+        # Publish discovery message for Home Assistant auto-detection
+        self._publish_discovery()
+
         self._publish_status()
 
         # Start auto-publish timer
@@ -500,6 +504,17 @@ class KioskMQTT:
             stats["uptime"] = f"{hours}h {minutes}m {seconds}s"
         except Exception:
             stats["uptime"] = None
+
+        # IP address
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1)
+            s.connect(("8.8.8.8", 80))
+            stats["ip_address"] = s.getsockname()[0]
+            s.close()
+        except Exception:
+            stats["ip_address"] = None
  
         return stats
     
@@ -514,6 +529,24 @@ class KioskMQTT:
             "system": system,
         })
         self.client.publish(f"{self.prefix}/status/response", status, retain=True)
+
+    def _publish_discovery(self):
+        """Publish discovery message so Home Assistant can auto-detect this kiosk."""
+        try:
+            hostname = socket.gethostname()
+        except Exception:
+            hostname = "pi-kiosk"
+
+        discovery = json.dumps({
+            "hostname": hostname,
+            "topic_prefix": self.prefix,
+        })
+        self.client.publish(
+            f"pi_kiosk/discovery/{self.prefix}",
+            discovery,
+            retain=True,
+        )
+        log.info("Published discovery to pi_kiosk/discovery/%s", self.prefix)
 
     def disconnect(self):
         self._stop_status_timer()

@@ -8,6 +8,13 @@
                     "name": "Device name",
                     "topic_prefix": "MQTT topic prefix"
                 }
+            },
+            "confirm": {
+                "title": "Discovered Pi Kiosk",
+                "description": "A Pi Kiosk was discovered on your network: **{hostname}** (topic prefix: `{topic_prefix}`). Choose a name and confirm to add it.",
+                "data": {
+                    "name": "Device name"
+                }
             }
         },
         "abort": {

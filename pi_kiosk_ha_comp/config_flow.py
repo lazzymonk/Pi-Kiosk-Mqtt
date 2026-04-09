@@ -19,12 +19,16 @@ class PiKioskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def __init__(self):
+        """Initialize the config flow."""
+        self._discovered_name: str | None = None
+        self._discovered_prefix: str | None = None
+
     async def async_step_user(self, user_input=None):
-        """Handle the initial step."""
+        """Handle the manual setup step."""
         errors = {}
 
         if user_input is not None:
-            # Check if this topic prefix is already configured
             await self.async_set_unique_id(user_input[CONF_TOPIC_PREFIX])
             self._abort_if_unique_id_configured()
 
@@ -42,6 +46,48 @@ class PiKioskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_mqtt(self, discovery_info):
+        """Handle auto-discovery from MQTT."""
+        topic_prefix = discovery_info[CONF_TOPIC_PREFIX]
+        hostname = discovery_info.get(CONF_NAME, "Pi Kiosk")
+
+        await self.async_set_unique_id(topic_prefix)
+        self._abort_if_unique_id_configured()
+
+        self._discovered_name = hostname
+        self._discovered_prefix = topic_prefix
+
+        # Set a nice title for the discovery notification
+        self.context["title_placeholders"] = {"name": hostname}
+
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(self, user_input=None):
+        """Ask user to confirm adding the discovered kiosk."""
+        if user_input is not None:
+            return self.async_create_entry(
+                title=user_input.get(CONF_NAME, self._discovered_name),
+                data={
+                    CONF_NAME: user_input.get(CONF_NAME, self._discovered_name),
+                    CONF_TOPIC_PREFIX: self._discovered_prefix,
+                },
+            )
+
+        return self.async_show_form(
+            step_id="confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_NAME, default=self._discovered_name
+                    ): str,
+                }
+            ),
+            description_placeholders={
+                "hostname": self._discovered_name,
+                "topic_prefix": self._discovered_prefix,
+            },
         )
 
     @staticmethod
